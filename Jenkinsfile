@@ -29,7 +29,7 @@ pipeline {
         stage('Apply: build AWS + install software') {
             when { expression { params.ACTION == 'apply' } }
             steps {
-                sh 'terraform apply -auto-approve -input=false -var="my_ip=106.219.165.107/32"'
+                sh 'terraform apply -auto-approve -input=false -var="my_ip=106.219.165.107/32" -var="key_name=grafana-vm-demo-key" -var="private_key_path=/Users/salonichaudhary/.ssh/grafana-vm-demo-key.pem"'
                 sh 'echo "Grafana is ready: $(terraform output -raw grafana_url)  (user: admin)"'
             }
         }
