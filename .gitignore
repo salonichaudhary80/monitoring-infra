@@ -1,0 +1,17 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Sensitive/local Terraform values
+terraform.tfvars
+
+# SSH keys
+*.pem
+
+# Ansible generated files
+inventory.ini
+
+# macOS
+.DS_Store

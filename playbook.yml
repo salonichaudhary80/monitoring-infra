@@ -1,0 +1,223 @@
+---
+# ------------------------------------------------------------
+# playbook.yml  -  installs the software (Ansible)
+# Runs on BOTH monitoring servers. Installs the 4 boxes you see
+# inside each EC2 in the diagram, top to bottom:
+#   1. node_exporter    :9100  shows CPU / memory / disk
+#   2. VictoriaMetrics  :8428  stores the numbers
+#   3. vmagent                 collects numbers from both servers
+#   4. Grafana          :3000  draws the dashboards
+# Terraform starts this file automatically (see ansible.tf).
+# ------------------------------------------------------------
+- name: Install the monitoring stack on monitoring-a and monitoring-b
+  hosts: monitoring
+  become: true          # run as root (needed to install software)
+  gather_facts: false
+
+  vars:
+    node_exporter_version: "1.9.1"
+    victoriametrics_version: "v1.110.0"
+    retention_period: "30d"               # keep data for 30 days
+    scrape_interval: "15s"                # collect new numbers every 15 seconds
+    grafana_admin_password: "Admin@123"   # Grafana login (user: admin). Change it!
+    vm_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/{{ victoriametrics_version }}"
+
+  tasks:
+    # ---------- 0. Wait for the new servers ----------
+    - name: Wait until the server accepts SSH (through the bastion)
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Wait until the server has finished booting
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false   # newer Ubuntu reports harmless warnings as an error code
+
+    # ---------- 1. node_exporter ----------
+    - name: "node_exporter | download"
+      ansible.builtin.unarchive:
+        src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: /opt
+        remote_src: true
+        creates: "/opt/node_exporter-{{ node_exporter_version }}.linux-amd64"
+
+    - name: "node_exporter | create service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/node_exporter.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=node_exporter (server metrics on port 9100)
+          After=network-online.target
+
+          [Service]
+          ExecStart=/opt/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart node_exporter
+
+    # ---------- 2. VictoriaMetrics ----------
+    - name: "VictoriaMetrics | create folder"
+      ansible.builtin.file:
+        path: /opt/victoriametrics
+        state: directory
+        mode: "0755"
+
+    - name: "VictoriaMetrics | download database"
+      ansible.builtin.unarchive:
+        src: "{{ vm_url }}/victoria-metrics-linux-amd64-{{ victoriametrics_version }}.tar.gz"
+        dest: /opt/victoriametrics
+        remote_src: true
+        creates: /opt/victoriametrics/victoria-metrics-prod
+
+    - name: "VictoriaMetrics | create service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/victoriametrics.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=VictoriaMetrics (metrics database on port 8428)
+          After=network-online.target
+
+          [Service]
+          ExecStart=/opt/victoriametrics/victoria-metrics-prod -storageDataPath=/var/lib/victoriametrics -retentionPeriod={{ retention_period }}
+          StateDirectory=victoriametrics
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart victoriametrics
+
+    # ---------- 3. vmagent ----------
+    - name: "vmagent | download"
+      ansible.builtin.unarchive:
+        src: "{{ vm_url }}/vmutils-linux-amd64-{{ victoriametrics_version }}.tar.gz"
+        dest: /opt/victoriametrics
+        remote_src: true
+        creates: /opt/victoriametrics/vmagent-prod
+
+    - name: "vmagent | create config folder"
+      ansible.builtin.file:
+        path: /etc/vmagent
+        state: directory
+        mode: "0755"
+
+    # "each vmagent scrapes both servers" (green dashed arrow in the diagram)
+    - name: "vmagent | list of servers to scrape (BOTH servers)"
+      ansible.builtin.copy:
+        dest: /etc/vmagent/scrape.yml
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: {{ scrape_interval }}
+          scrape_configs:
+            - job_name: node
+              static_configs:
+          {% for host in groups['monitoring'] %}
+                - targets: ["{{ hostvars[host].ansible_host }}:9100"]
+                  labels:
+                    server: {{ host }}
+          {% endfor %}
+      notify: Restart vmagent
+
+    - name: "vmagent | create service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/vmagent.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=vmagent (collects metrics and writes them to VictoriaMetrics)
+          After=network-online.target victoriametrics.service
+
+          [Service]
+          ExecStart=/opt/victoriametrics/vmagent-prod -promscrape.config=/etc/vmagent/scrape.yml -remoteWrite.url=http://localhost:8428/api/v1/write -remoteWrite.tmpDataPath=/var/lib/vmagent
+          StateDirectory=vmagent
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart vmagent
+
+    - name: "node_exporter, VictoriaMetrics, vmagent | start (and start after every reboot)"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - node_exporter
+        - victoriametrics
+        - vmagent
+
+    # ---------- 4. Grafana ----------
+    - name: "Grafana | add signing key"
+      ansible.builtin.get_url:
+        url: https://apt.grafana.com/gpg.key
+        dest: /etc/apt/keyrings/grafana.asc
+        mode: "0644"
+
+    - name: "Grafana | add package repository"
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main"
+        filename: grafana
+        update_cache: false   # the next task updates the package list
+
+    - name: "Grafana | install"
+      ansible.builtin.apt:
+        name: grafana
+        update_cache: true
+        lock_timeout: 600     # wait if Ubuntu is still installing its own updates
+
+    - name: "Grafana | set admin password"
+      ansible.builtin.lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: '^;?admin_password ='
+        line: "admin_password = {{ grafana_admin_password }}"
+      notify: Restart grafana
+
+    # Blue arrow in the diagram: Grafana reads from VictoriaMetrics on the same server
+    - name: "Grafana | connect to VictoriaMetrics"
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/datasources/victoriametrics.yml
+        mode: "0644"
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: VictoriaMetrics
+              type: prometheus
+              url: http://localhost:8428
+              isDefault: true
+      notify: Restart grafana
+
+    - name: "Grafana | start"
+      ansible.builtin.systemd:
+        name: grafana-server
+        enabled: true
+        state: started
+
+  # Handlers restart a program only when its settings changed
+  handlers:
+    - name: Restart node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart victoriametrics
+      ansible.builtin.systemd:
+        name: victoriametrics
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart vmagent
+      ansible.builtin.systemd:
+        name: vmagent
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
