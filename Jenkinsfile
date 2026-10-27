@@ -13,11 +13,11 @@ pipeline {
     }
 
     environment {
-        // AWS keys saved in Jenkins (Manage Jenkins > Credentials) as "Secret text"
-        AWS_ACCESS_KEY_ID = credentials('aws-monitoring-demo')
-        AWS_DEFAULT_REGION = 'ap-south-1'
-
+    PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    AWS_ACCESS_KEY_ID = credentials('aws-monitoring-demo')
+    AWS_DEFAULT_REGION = 'ap-south-1'
     }
+
 
     stages {
         stage('Terraform Init') {
