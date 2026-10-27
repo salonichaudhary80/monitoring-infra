@@ -29,7 +29,7 @@ pipeline {
         stage('Apply: build AWS + install software') {
             when { expression { params.ACTION == 'apply' } }
             steps {
-                sh 'terraform apply -auto-approve -input=false'
+                sh 'terraform apply -auto-approve -input=false -var="my_ip=106.219.165.107/32"'
                 sh 'echo "Grafana is ready: $(terraform output -raw grafana_url)  (user: admin)"'
             }
         }
