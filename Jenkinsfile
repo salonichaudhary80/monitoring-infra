@@ -37,7 +37,7 @@ pipeline {
         stage('Destroy: delete everything') {
             when { expression { params.ACTION == 'destroy' } }
             steps {
-                sh 'terraform destroy -auto-approve -input=false'
+                sh 'terraform destroy -auto-approve -input=false -var="my_ip=106.219.165.107/32" -var="key_name=grafana-vm-demo-key" -var="private_key_path=/Users/salonichaudhary/.ssh/grafana-vm-demo-key.pem"'
             }
         }
     }
